@@ -124,3 +124,6 @@ Environment variables:
 ## License
 
 MIT License - see LICENSE file for details.
+
+If you work on Fitbit:
+please incorporate this, make my life easy :D
