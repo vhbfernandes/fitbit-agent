@@ -40,6 +40,16 @@ func TestLogMealFlexibility(t *testing.T) {
 			input:   `{"meal_type": "morning", "foods": [{"name": "cereal", "quantity": 1, "unit": "bowl", "calories": 200}]}`,
 			wantErr: false,
 		},
+		{
+			name:    "Multiple days meal prep",
+			input:   `{"meal_type": "lunch", "foods": [{"name": "chicken", "quantity": 160, "unit": "grams", "calories": 256}, {"name": "rice", "quantity": 50, "unit": "grams", "calories": 120}], "days_count": 5}`,
+			wantErr: false,
+		},
+		{
+			name:    "Multiple days with start date",
+			input:   `{"meal_type": "lunch", "foods": [{"name": "salad", "quantity": 1, "unit": "bowl", "calories": 200}], "days_count": 3, "start_date": "2025-08-14"}`,
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range testCases {

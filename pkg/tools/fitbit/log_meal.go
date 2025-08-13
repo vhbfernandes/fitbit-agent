@@ -31,7 +31,7 @@ func (t *LogMealTool) Name() string {
 
 // Description returns the tool description
 func (t *LogMealTool) Description() string {
-	return "Log a meal to Fitbit with automatic calorie estimation. Accepts natural language descriptions and converts to structured meal data."
+	return "Log a meal to Fitbit with automatic calorie estimation. Accepts natural language descriptions and converts to structured meal data. Supports logging the same meal for multiple days (useful for meal prep scenarios)."
 }
 
 // InputSchema returns the input schema for the tool
@@ -79,6 +79,14 @@ func (t *LogMealTool) InputSchema() map[string]interface{} {
 				"type":        "string",
 				"description": "Additional notes about the meal",
 			},
+			"days_count": map[string]interface{}{
+				"type":        "number",
+				"description": "Number of days to log this meal for (for meal prep scenarios). Defaults to 1.",
+			},
+			"start_date": map[string]interface{}{
+				"type":        "string",
+				"description": "Start date for logging multiple days (YYYY-MM-DD format). Defaults to today for single day, tomorrow for multiple days.",
+			},
 		},
 		"required": []string{"meal_type", "foods"},
 	}
@@ -97,6 +105,8 @@ type LogMealInput struct {
 	Notes         string     `json:"notes,omitempty"`
 	Description   string     `json:"description,omitempty"`    // Alternative field name
 	TotalCalories any        `json:"total_calories,omitempty"` // For validation
+	DaysCount     any        `json:"days_count,omitempty"`     // Number of days to log
+	StartDate     string     `json:"start_date,omitempty"`     // Start date for multiple days
 }
 
 // FoodItem represents a single food item with maximum flexibility
@@ -217,20 +227,44 @@ After authentication, I'll log your meal automatically.`, nil
 		}
 	}
 
-	// Make actual API call to Fitbit
-	err := t.logMealToFitbit(ctx, mealType, parsedFoods, mealInput)
-	if err != nil {
-		// If unauthorized, suggest re-authentication
-		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "unauthorized") {
-			return `🔐 Authentication Expired!
+	// Parse days count (default to 1)
+	daysCount := 1
+	if mealInput.DaysCount != nil {
+		if days, err := parseNumberField(mealInput.DaysCount, "days_count"); err == nil && days > 0 {
+			daysCount = int(days)
+		}
+	}
+
+	// Parse start date
+	startDate := time.Now()
+	if mealInput.StartDate != "" {
+		if parsed, err := time.Parse("2006-01-02", mealInput.StartDate); err == nil {
+			startDate = parsed
+		}
+	} else if daysCount > 1 {
+		// If logging multiple days but no start date specified, start tomorrow
+		startDate = time.Now().AddDate(0, 0, 1)
+	}
+
+	// Make actual API calls to Fitbit for each day
+	var loggedDates []string
+	for i := 0; i < daysCount; i++ {
+		currentDate := startDate.AddDate(0, 0, i)
+		err := t.logMealToFitbit(ctx, mealType, parsedFoods, mealInput, currentDate)
+		if err != nil {
+			// If unauthorized, suggest re-authentication
+			if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "unauthorized") {
+				return `🔐 Authentication Expired!
 
 Your Fitbit access token has expired. Let me help you re-authenticate.
 
 TOOL_CALL: fitbit_login({})
 
 After re-authentication, I'll log your meal automatically.`, nil
+			}
+			return "", fmt.Errorf("failed to log meal to Fitbit for %s: %w", currentDate.Format("2006-01-02"), err)
 		}
-		return "", fmt.Errorf("failed to log meal to Fitbit: %w", err)
+		loggedDates = append(loggedDates, currentDate.Format("Jan 2"))
 	}
 
 	// Format success response
@@ -244,19 +278,37 @@ After re-authentication, I'll log your meal automatically.`, nil
 		foodList = append(foodList, foodStr)
 	}
 
-	// Get meal time
-	mealTime := getMealTime(mealInput)
-
-	result := fmt.Sprintf(`✅ Successfully logged %s to Fitbit (%s):
+	// Build result message
+	var result string
+	if daysCount == 1 {
+		// Single day logging
+		mealTime := getMealTime(mealInput)
+		result = fmt.Sprintf(`✅ Successfully logged %s to Fitbit (%s):
 %s
 
 💯 Total: ~%.0f calories
 
 🎉 Meal logged to your Fitbit account! Check your Fitbit app to see the nutrition data.`,
-		mealType,
-		mealTime,
-		strings.Join(foodList, "\n"),
-		totalCalories)
+			mealType,
+			mealTime,
+			strings.Join(foodList, "\n"),
+			totalCalories)
+	} else {
+		// Multiple days logging
+		result = fmt.Sprintf(`✅ Successfully logged %s to Fitbit for %d days (%s):
+%s
+
+💯 Total per meal: ~%.0f calories
+🗓️ Logged for: %s
+
+🎉 All meals logged to your Fitbit account! Check your Fitbit app to see the nutrition data for each day.`,
+			mealType,
+			daysCount,
+			strings.Join(loggedDates, ", "),
+			strings.Join(foodList, "\n"),
+			totalCalories,
+			strings.Join(loggedDates, ", "))
+	}
 
 	// Add notes if provided
 	notes := getNotes(mealInput)
@@ -588,7 +640,7 @@ func (t *LogMealTool) isAuthenticated() bool {
 }
 
 // logMealToFitbit makes the actual API call to Fitbit to log the meal
-func (t *LogMealTool) logMealToFitbit(ctx context.Context, mealType string, foods []ParsedFoodItem, input LogMealInput) error {
+func (t *LogMealTool) logMealToFitbit(ctx context.Context, mealType string, foods []ParsedFoodItem, input LogMealInput, targetDate time.Time) error {
 	config.LoadConfig()
 	accessToken := os.Getenv("FITBIT_ACCESS_TOKEN")
 	userID := os.Getenv("FITBIT_USER_ID")
@@ -600,13 +652,8 @@ func (t *LogMealTool) logMealToFitbit(ctx context.Context, mealType string, food
 		return fmt.Errorf("missing FITBIT_USER_ID")
 	}
 
-	// Get the date for the meal (default to today)
-	date := time.Now().Format("2006-01-02")
-	if mealTime := getMealTime(input); mealTime != "now" {
-		// If a specific time was provided, try to parse it
-		// For now, we'll use today's date but this could be enhanced
-		date = time.Now().Format("2006-01-02")
-	}
+	// Get the date for the meal
+	date := targetDate.Format("2006-01-02")
 
 	// Log each food item individually to Fitbit
 	client := &http.Client{Timeout: 30 * time.Second}
